@@ -14,37 +14,33 @@
 
 package com.example.dataflow;
 
-import com.google.api.client.googleapis.json.GoogleJsonResponseException;
-import com.google.api.client.googleapis.services.AbstractGoogleClientRequest;
 import com.google.api.client.util.Lists;
 import com.google.api.client.util.Sets;
-import com.google.api.services.bigquery.Bigquery;
-import com.google.api.services.bigquery.Bigquery.Datasets;
-import com.google.api.services.bigquery.Bigquery.Tables;
-import com.google.api.services.bigquery.model.Dataset;
-import com.google.api.services.bigquery.model.DatasetReference;
-import com.google.api.services.bigquery.model.Table;
-import com.google.api.services.bigquery.model.TableReference;
-import com.google.api.services.bigquery.model.TableSchema;
 import com.google.api.services.dataflow.Dataflow;
-import com.google.api.services.pubsub.Pubsub;
-import com.google.api.services.pubsub.model.Topic;
+import com.google.cloud.ServiceOptions;
+import com.google.cloud.bigquery.BigQuery;
+import com.google.cloud.bigquery.BigQueryOptions;
+import com.google.cloud.bigquery.Dataset;
+import com.google.cloud.bigquery.DatasetInfo;
+import com.google.cloud.bigquery.Field;
+import com.google.cloud.bigquery.Schema;
+import com.google.cloud.bigquery.StandardTableDefinition;
+import com.google.cloud.bigquery.Table;
+import com.google.cloud.bigquery.TableId;
+import com.google.cloud.bigquery.TableInfo;
+import com.google.cloud.pubsub.spi.v1.TopicAdminClient;
+import com.google.pubsub.v1.TopicName;
 import org.apache.beam.runners.dataflow.DataflowPipelineJob;
 import org.apache.beam.runners.dataflow.DataflowRunner;
 import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.runners.dataflow.util.MonitoringUtil;
-import org.apache.beam.runners.direct.DirectRunner;
 import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.options.BigQueryOptions;
-import org.apache.beam.sdk.util.Transport;
 import org.joda.time.Duration;
 
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
-
-import javax.servlet.http.HttpServletResponse;
 
 /**
  * The utility class that sets up and tears down external resources, starts the Google Cloud Pub/Sub
@@ -55,8 +51,6 @@ import javax.servlet.http.HttpServletResponse;
 public class DataflowExampleUtils {
 
   private final DataflowPipelineOptions options;
-  private Bigquery bigQueryClient = null;
-  private Pubsub pubsubClient = null;
   private Dataflow dataflowClient = null;
   private Set<DataflowPipelineJob> jobsToCancel = Sets.newHashSet();
   private List<String> pendingMessages = Lists.newArrayList();
@@ -71,7 +65,7 @@ public class DataflowExampleUtils {
 
   /** Do resources and runner options setup. */
   public DataflowExampleUtils(DataflowPipelineOptions options, boolean isUnbounded)
-      throws IOException {
+      throws Exception {
     this.options = options;
     setupResourcesAndRunner(isUnbounded);
   }
@@ -80,15 +74,18 @@ public class DataflowExampleUtils {
    * Sets up external resources that are required by the example, such as Pub/Sub topics and
    * BigQuery tables.
    *
-   * @throws IOException if there is a problem setting up the resources
+   * @throws Exception if there is a problem setting up the resources
    */
-  void setup() throws IOException {
+  void setup() throws Exception {
     setupPubsubTopic();
     setupBigQueryTable();
   }
 
+  private void tearDown() {
+  }
+
   /** Set up external resources, and configure the runner appropriately. */
-  private void setupResourcesAndRunner(boolean isUnbounded) throws IOException {
+  private void setupResourcesAndRunner(boolean isUnbounded) throws Exception {
     if (isUnbounded) {
       options.setStreaming(true);
     }
@@ -103,7 +100,7 @@ public class DataflowExampleUtils {
    *
    * @throws IOException if there is a problem setting up the Pub/Sub topic
    */
-  private void setupPubsubTopic() throws IOException {
+  private void setupPubsubTopic() throws Exception {
     ExamplePubsubTopicOptions pubsubTopicOptions = options.as(ExamplePubsubTopicOptions.class);
     if (!pubsubTopicOptions.getPubsubTopic().isEmpty()) {
       pendingMessages.add("*******************Set Up Pubsub Topic*********************");
@@ -120,121 +117,67 @@ public class DataflowExampleUtils {
    * <p>If the table already exists, the schema has to match the given one. Otherwise, the example
    * will throw a RuntimeException. If the table doesn't exist, a new table with the given schema
    * will be created.
-   *
-   * @throws IOException if there is a problem setting up the BigQuery table
    */
-  void setupBigQueryTable() throws IOException {
+  private void setupBigQueryTable() {
     ExampleBigQueryTableOptions bigQueryTableOptions =
         options.as(ExampleBigQueryTableOptions.class);
-    if (bigQueryTableOptions.getBigQueryDataset() != null
-        && bigQueryTableOptions.getBigQueryTable() != null
-        && bigQueryTableOptions.getBigQuerySchema() != null) {
-      pendingMessages.add("******************Set Up Big Query Table*******************");
-      setupBigQueryTable(
-          bigQueryTableOptions.getProject(),
-          bigQueryTableOptions.getBigQueryDataset(),
-          bigQueryTableOptions.getBigQueryTable(),
-          bigQueryTableOptions.getBigQuerySchema());
-      pendingMessages.add(
-          "The BigQuery table has been set up for this example: "
-              + bigQueryTableOptions.getProject()
-              + ":"
-              + bigQueryTableOptions.getBigQueryDataset()
-              + "."
-              + bigQueryTableOptions.getBigQueryTable());
+
+    BigQuery bigquery = BigQueryOptions.getDefaultInstance().getService();
+
+    String projectName = bigQueryTableOptions.getProject();
+    String datasetName = bigQueryTableOptions.getBigQueryDataset();
+    String tableName = bigQueryTableOptions.getBigQueryTable();
+
+    Schema schema = Schema.newBuilder()
+        .addField(Field.of("station_id", Field.Type.string()))
+        .addField(Field.of("direction", Field.Type.string()))
+        .addField(Field.of("freeway", Field.Type.string()))
+        .addField(Field.of("lane_max_flow", Field.Type.integer()))
+        .addField(Field.of("lane", Field.Type.string()))
+        .addField(Field.of("avg_occ", Field.Type.floatingPoint()))
+        .addField(Field.of("avg_speed", Field.Type.floatingPoint()))
+        .addField(Field.of("total_flow", Field.Type.integer()))
+        .addField(Field.of("window_timestamp", Field.Type.timestamp()))
+        .addField(Field.of("recorded_timestamp", Field.Type.string()))
+        .build();
+
+    // Prepares a new dataset
+    Dataset dataset = null;
+    Table table = null;
+
+    DatasetInfo datasetInfo = DatasetInfo.newBuilder(datasetName).build();
+
+    TableInfo tableInfo = TableInfo
+        .newBuilder(TableId.of(projectName, datasetName, tableName), StandardTableDefinition.of(schema))
+        .build();
+
+    // Creates the dataset
+    try {
+      dataset = bigquery.create(datasetInfo);
+      pendingMessages.add(dataset.getDatasetId().getDataset() + " created.");
+    } catch(Exception e) {
+      System.err.println(e.getMessage());
     }
+
+    try {
+      table = bigquery.create(tableInfo);
+      pendingMessages.add(table.getTableId().getTable() + " created.");
+    } catch(Exception e) {
+      System.err.println(e.getMessage());
+    }
+
+
   }
 
-  /** Tears down external resources that can be deleted upon the example's completion. */
-  private void tearDown() {
-    pendingMessages.add("*************************Tear Down*************************");
-    ExamplePubsubTopicOptions pubsubTopicOptions = options.as(ExamplePubsubTopicOptions.class);
-    if (!pubsubTopicOptions.getPubsubTopic().isEmpty()) {
-      try {
-        deletePubsubTopic(pubsubTopicOptions.getPubsubTopic());
-        pendingMessages.add(
-            "The Pub/Sub topic has been deleted: " + pubsubTopicOptions.getPubsubTopic());
-      } catch (IOException e) {
-        pendingMessages.add(
-            "Failed to delete the Pub/Sub topic : " + pubsubTopicOptions.getPubsubTopic());
-      }
-    }
+  private void setupPubsubTopic(String topicId) throws Exception {
+    String projectId = ServiceOptions.getDefaultProjectId();
+    TopicName topic = TopicName.create(projectId, topicId);
 
-    ExampleBigQueryTableOptions bigQueryTableOptions =
-        options.as(ExampleBigQueryTableOptions.class);
-    if (bigQueryTableOptions.getBigQueryDataset() != null
-        && bigQueryTableOptions.getBigQueryTable() != null
-        && bigQueryTableOptions.getBigQuerySchema() != null) {
-      pendingMessages.add(
-          "The BigQuery table might contain the example's output, "
-              + "and it is not deleted automatically: "
-              + bigQueryTableOptions.getProject()
-              + ":"
-              + bigQueryTableOptions.getBigQueryDataset()
-              + "."
-              + bigQueryTableOptions.getBigQueryTable());
-      pendingMessages.add(
-          "Please go to the Developers Console to delete it manually."
-              + " Otherwise, you may be charged for its usage.");
-    }
-  }
-
-  private void setupBigQueryTable(
-      String projectId, String datasetId, String tableId, TableSchema schema) throws IOException {
-    if (bigQueryClient == null) {
-      bigQueryClient = Transport.newBigQueryClient(options.as(BigQueryOptions.class)).build();
-    }
-
-    Datasets datasetService = bigQueryClient.datasets();
-    if (executeNullIfNotFound(datasetService.get(projectId, datasetId)) == null) {
-      Dataset newDataset =
-          new Dataset()
-              .setDatasetReference(
-                  new DatasetReference().setProjectId(projectId).setDatasetId(datasetId));
-      datasetService.insert(projectId, newDataset).execute();
-    }
-
-    Tables tableService = bigQueryClient.tables();
-    Table table = executeNullIfNotFound(tableService.get(projectId, datasetId, tableId));
-    if (table == null) {
-      Table newTable =
-          new Table()
-              .setSchema(schema)
-              .setTableReference(
-                  new TableReference()
-                      .setProjectId(projectId)
-                      .setDatasetId(datasetId)
-                      .setTableId(tableId));
-      tableService.insert(projectId, datasetId, newTable).execute();
-    } else if (!table.getSchema().equals(schema)) {
-      throw new RuntimeException(
-          "Table exists and schemas do not match, expecting: "
-              + schema.toPrettyString()
-              + ", actual: "
-              + table.getSchema().toPrettyString());
-    }
-  }
-
-  private void setupPubsubTopic(String topic) throws IOException {
-    if (pubsubClient == null) {
-      pubsubClient = Transport.newPubsubClient(options).build();
-    }
-    if (executeNullIfNotFound(pubsubClient.projects().topics().get(topic)) == null) {
-      pubsubClient.projects().topics().create(topic, new Topic().setName(topic)).execute();
-    }
-  }
-
-  /**
-   * Deletes the Google Cloud Pub/Sub topic.
-   *
-   * @throws IOException if there is a problem deleting the Pub/Sub topic
-   */
-  private void deletePubsubTopic(String topic) throws IOException {
-    if (pubsubClient == null) {
-      pubsubClient = Transport.newPubsubClient(options).build();
-    }
-    if (executeNullIfNotFound(pubsubClient.projects().topics().get(topic)) != null) {
-      pubsubClient.projects().topics().delete(topic).execute();
+    try (TopicAdminClient topicAdminClient = TopicAdminClient.create()) {
+      topicAdminClient.createTopic(topic);
+    } catch (Exception e) {
+      System.err.print(e.getMessage());
+      // throw e;
     }
   }
 
@@ -243,12 +186,14 @@ public class DataflowExampleUtils {
    * streaming, and if streaming is specified, use the DataflowPipelineRunner. Return the streaming
    * flag value.
    */
-  void setupRunner() {
+  private void setupRunner() {
     if (options.isStreaming()) {
+      /*
       if (options.getRunner() == DirectRunner.class) {
         throw new IllegalArgumentException(
             "Processing of unbounded input sources is not supported with the DirectRunner.");
       }
+      */
       // In order to cancel the pipelines automatically,
       // {@literal DataflowRunner} is forced to be used.
       options.setRunner(DataflowRunner.class);
@@ -340,18 +285,5 @@ public class DataflowExampleUtils {
     }
     System.out.println("***********************************************************");
     System.out.println("***********************************************************");
-  }
-
-  private static <T> T executeNullIfNotFound(AbstractGoogleClientRequest<T> request)
-      throws IOException {
-    try {
-      return request.execute();
-    } catch (GoogleJsonResponseException e) {
-      if (e.getStatusCode() == HttpServletResponse.SC_NOT_FOUND) {
-        return null;
-      } else {
-        throw e;
-      }
-    }
   }
 }

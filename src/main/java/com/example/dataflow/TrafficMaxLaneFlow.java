@@ -20,29 +20,23 @@ import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.TableRow;
 import com.google.api.services.bigquery.model.TableSchema;
+import org.apache.avro.reflect.Nullable;
 import org.apache.beam.runners.dataflow.DataflowRunner;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.DefaultCoder;
-import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
-import org.apache.beam.sdk.io.PubsubIO;
 import org.apache.beam.sdk.io.TextIO;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
-import org.apache.beam.sdk.transforms.Combine;
-import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.PTransform;
-import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.transforms.windowing.SlidingWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
-
-import org.apache.avro.reflect.Nullable;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.joda.time.format.DateTimeFormat;
@@ -351,7 +345,7 @@ public class TrafficMaxLaneFlow {
    *
    * @throws IOException if there is a problem setting up resources
    */
-  public static void main(String[] args) throws IOException {
+  public static void main(String[] args) throws Exception {
     TrafficMaxLaneFlowOptions options =
         PipelineOptionsFactory.fromArgs(args).withValidation().as(TrafficMaxLaneFlowOptions.class);
     if (options.isStreaming()) {
@@ -373,15 +367,20 @@ public class TrafficMaxLaneFlow {
     PCollection<String> rawInput;
     PCollection<KV<String, LaneInfo>> input;
 
+    String topicName = new StringBuilder()
+        .append("projects/")
+        .append(options.getProject())
+        .append("/topics/")
+        .append(options.getPubsubTopic()).toString();
+
     if (options.isStreaming()) {
       rawInput =
           pipeline.apply(
               "StreamFromPubsub",
-              PubsubIO.<String>read()
-                  .withCoder(StringUtf8Coder.of())
-                  .topic(options.getPubsubTopic()));
+              PubsubIO.readStrings()
+                  .fromTopic(topicName));
     } else {
-      rawInput = pipeline.apply("ReadFromFile", TextIO.Read.from(options.getInputFile()));
+      rawInput = pipeline.apply("ReadFromFile", TextIO.read().from(options.getInputFile()));
     }
 
     // row... => <stationId, LaneInfo> ...
@@ -394,13 +393,15 @@ public class TrafficMaxLaneFlow {
         .apply(
             Window.<KV<String, LaneInfo>>into(
                 SlidingWindows.of(Duration.standardMinutes(options.getWindowDuration()))
-                    .every(Duration.standardMinutes(options.getWindowSlideEvery()))))
+                    .every(Duration.standardMinutes(options.getWindowSlideEvery())))
+                .withAllowedLateness(Duration.standardDays(5000))
+                .accumulatingFiredPanes())
         .apply(new MaxLaneFlow())
-        .apply(BigQueryIO.Write.to(tableRef).withSchema(FormatMaxesFn.getSchema()));
+        .apply(BigQueryIO.writeTableRows().to(tableRef).withSchema(FormatMaxesFn.getSchema()));
 
     PipelineResult result = pipeline.run();
     // dataflowUtils will try to cancel the pipeline and the injector before the program exists.
-    // dataflowUtils.waitToFinish(result);
+    dataflowUtils.waitToFinish(result);
   }
 
   private static Integer tryIntParse(String number) {
